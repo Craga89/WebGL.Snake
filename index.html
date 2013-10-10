@@ -1,0 +1,1655 @@
+<!doctype html>
+<html>
+<head>
+<title>WebGL Snake</title>
+<style>
+body{
+	padding: 0;
+	margin: 0;
+
+	background-color: #222;
+	color: white;
+
+	font-family: 'Helvetica', 'Tahoma', sans-serif;
+}
+
+
+#snake{
+	display: table;
+	position: absolute;
+	left: 0; top: 0;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+
+	text-align: center;
+}
+
+#snake canvas{
+	display: table-cell;
+	vertical-align: middle;
+	margin: auto auto;
+}
+
+#snake .center{
+	position: relative;
+	display: table-cell;
+	vertical-align: middle;
+
+	text-align: center;
+	font-weight: bold;
+	font-size: 20px;
+}
+
+#loading{
+	display: table;
+	position: absolute;
+	left: 0; top: 0;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	z-index: 100;
+
+	text-align: center;
+
+	background-color: rgba(0,0,0,1.0);
+}
+
+#loading div{
+	display: table-cell;
+	vertical-align: middle;
+
+	line-height: 25px;
+	text-align: center;
+}
+
+#fps{
+	position: absolute;
+	top: 10px; left: 10px;
+}
+
+#hud{
+	position: absolute;
+	top: 50%; left: 50%;
+	width: 90px;
+	padding: 5px 20px;
+	margin: -300px 0 0 370px;
+	z-index: 10;
+
+	font-weight: bold;
+	color: #222;
+
+	background-color: rgba(255,255,255,1.0);
+}
+
+#hud b{
+	font-size: 30px;
+	display: block;
+}
+
+#hud i{
+	
+}
+
+#gameover{
+	position: absolute;
+	left: 0; top: 0;
+	width: 100%;
+	height: 100%;
+	z-index: 10;
+	display: none;
+
+	background: transparent url(textures/gameover.jpg) 50% 50%;
+	text-align: center;
+}
+
+#gameover p{
+	position: absolute;
+	bottom: 40%; left: 50%;
+	width: 500px;
+	margin: 0 0 0 -250px;
+
+	text-align: center;
+	font-size: 12px;
+	text-transform: uppercase;
+	word-spacing: 2px;
+}
+</style>
+</head>
+<body>
+
+<div id="snake">
+
+	<div class="center">
+		<canvas id="game" width="1000" height="600">
+			Sorry, you need a WebGL enabled browser to play this game!
+		</canvas>
+
+		<div id="hud"></div>
+
+		<div id="loading">
+			<div>Loading game...</div>
+		</div>
+
+		<div id="gameover">
+			<p>Refresh to play again</p>
+		</div>
+	</div>
+
+	<div id="fps"></div>
+</div>
+
+
+<script type="text/javascript" src="lib/glmatrix-0.9.5.min.js"></script>
+<script type="text/javascript" src="lib/webgl-utils.js"></script>
+<script type="text/javascript" src="lib/j3di.js"></script>
+<script type="text/javascript" src="lib/j3dimath.js"></script>
+<script type="text/javascript" src="lib/class.js"></script>
+<script type="text/javascript" src="lib/input.js"></script>
+
+<script id="shader-fs" type="x-shader/x-fragment">
+	precision mediump float;
+
+	varying vec4 vColor;
+	varying vec2 vTextureCoord;
+	varying vec3 vLightWeighting;
+
+	uniform bool uUseTextures;
+	uniform bool uUseLighting;
+
+	uniform sampler2D uSampler;
+
+	void main(void) {
+		vec4 fragmentColor;
+
+		if(uUseTextures) {
+			fragmentColor = texture2D(uSampler, vec2(vTextureCoord.s, vTextureCoord.t));
+		}
+		else {
+			fragmentColor = vColor;
+		}
+
+		gl_FragColor = vec4(fragmentColor.rgb * vLightWeighting, fragmentColor.a);
+	}
+</script>
+
+<script id="shader-vs" type="x-shader/x-vertex">
+	attribute vec3 aVertexPosition;
+	attribute vec3 aVertexNormal;
+	attribute vec2 aTextureCoord;
+	attribute vec4 aVertexColor;
+
+	uniform mat4 uMVMatrix;
+	uniform mat4 uPMatrix;
+	uniform mat3 uNMatrix;
+
+	uniform vec3 uAmbientColor;
+
+	uniform vec3 uPointLightingLocation;
+	uniform vec3 uPointLightingColor;
+
+	uniform bool uUseLighting;
+
+	varying vec4 vColor;
+	varying vec2 vTextureCoord;
+	varying vec3 vLightWeighting;
+
+	void main(void) {
+		vec4 mvPosition = uMVMatrix * vec4(aVertexPosition, 1.0);
+		gl_Position = uPMatrix * mvPosition;
+		vTextureCoord = aTextureCoord;
+		vColor = aVertexColor;
+
+		if (!uUseLighting) {
+			vLightWeighting = vec3(1.0, 1.0, 1.0);
+		} else {
+			vec3 lightDirection = normalize(uPointLightingLocation - mvPosition.xyz);
+
+			vec3 transformedNormal = uNMatrix * aVertexNormal;
+			float directionalLightWeighting = max(dot(transformedNormal, lightDirection), 0.0);
+			vLightWeighting = uAmbientColor + uPointLightingColor * directionalLightWeighting;
+		}
+	}
+</script>
+
+<script type="text/javascript">
+/*
+ * Simple degree to radian conveter
+ */
+function degToRad(angle) { return angle * Math.PI / 180 }
+
+/*
+ * Random number generator function
+ * Taken from: https://gist.github.com/1230098
+ */
+function random() {
+	var f = Math.floor, r = Math.random, a = arguments;
+	switch(a.length){
+		case 0: return f(r()); break;
+		case 1: return f(r() * (a[0] + 1));break;
+		case 2: return f(r() * (a[1] - a[0] + 1)) + a[0];break;
+	}
+};
+
+/*
+ * Frame timer i.e. delta time class
+ */
+var FrameTimer = Class.extend({
+	init: function() {
+		this._last = (new Date()).getTime();
+	},
+
+	getDelta: function() {
+ 		var seconds = this._frameSpacing / 1000;
+		return isNaN(seconds) ? 0 : seconds;
+	},
+
+	tick: function() {
+		var currentTick = (new Date()).getTime();
+		this._frameSpacing = currentTick - this._last;
+		this._last = currentTick;
+	}
+});
+
+/*
+ * Matrix encapsulation class
+ *
+ * Add stack-like behaviour to mat4 matrices
+ */
+var Matrix = Class.extend({
+	init: function() {
+		this._stack = [ mat4.create() ];
+		this._index = 0;
+		this.matrix = this._stack[0];
+	},
+
+	pop: function() {
+		if(!this._stack.length) { return null; }
+		else { this._index--; }
+
+		this.matrix = this._stack[ this._index ];
+		return this._stack.pop();
+	},
+
+	push: function() {
+		var copy = mat4.create();
+		mat4.set(this._stack[ this._index ], copy);
+		this._stack.push(copy);
+
+		return this.matrix = this._stack[ ++this._index ];
+	}
+});
+
+function Game(canvas) {
+	var game = this,
+
+	elements = {
+		canvas: canvas,
+		loading: document.getElementById('loading'),
+		gameover: document.getElementById('gameover')
+	},
+
+	// GL Context and shader program
+	gl, shaderProgram,
+
+	// Input handlers
+	keyboard = new KeyboardHandler(),
+	mouse = new MouseHandler(canvas),
+
+	// Model view and perspective matrices
+	mvMatrix = new Matrix(),
+	pMatrix = new Matrix(),
+
+	// Frame timer
+	timer = new FrameTimer(),
+
+	// Game properties
+	options = {
+		speed: 4,
+		initialLength: 5,
+		initialLives: 3,
+		blockSize: 2
+	},
+
+	// Transform matrix and zoom level
+	transform = mat4.identity( mat4.create() ),
+	zoom = -50,
+
+	// Cameras
+	cameras = {
+		first: {
+			yaw: 90,
+			pitch: 180,
+			x: 3,
+			y: 0,
+			z: 1
+		},
+		
+		current: 'third'
+	}
+
+	// Textures and lighting
+	textures = {},
+	lighting = [ 1.0, 1.0, 1.0 ],
+
+	// Cache
+	cache = {
+		pause: 1 // Pause flag
+	};
+
+	// Globals
+	this.maze = null;
+	this.snake = null;
+	this.hud = null;
+	this.objects = [];
+
+	// Constants
+	this.TYPE_GRID = 1;
+	this.TYPE_SNAKE = 2;
+	this.TYPE_APPLE = 3;
+	this.TYPE_SHRINK = 4;
+
+	/*
+	 * Texture class
+	 *
+	 * Loads textures from local url and creates GL texture
+	 */
+	var Texture = Class.extend({
+		init: function(url) {
+			var _this = this;
+			this.texture = gl.createTexture();
+			this.image = new Image();
+			this.image.src = url;
+			this.image.onload = function() { _this.parse() };
+		},
+
+		parse: function() {
+			gl.bindTexture(gl.TEXTURE_2D, this.texture);
+			gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.image);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+			gl.generateMipmap(gl.TEXTURE_2D);
+			gl.bindTexture(gl.TEXTURE_2D, null);
+		}
+	});
+
+	/*
+	 * Primitive shape class
+	 *
+	 * Basis for all renderable 2D and 3D objects
+	 * within the game. Has basic transform and
+	 * texture properties.
+	 */
+	var Primitive = Class.extend({
+		name: 'Unnamed primitive',
+
+		init: function(color) {
+			// Setup matrices
+			this.mxScale = mat4.create();
+			mat4.identity(this.mxScale);
+			this.mxRotation = mat4.create();
+			mat4.identity(this.mxRotation);
+			this.mxTranslation = mat4.create();
+			mat4.identity(this.mxTranslation);
+
+			// Setup colors and textures
+			this.color = color || [ 1.0, 1.0, 1.0 ];
+			this.textures = [];
+
+			// Setup draw type
+			this.drawType = gl.TRIANGLES;
+
+			// Setup buffers
+			this.buffers = {
+				vertices: gl.createBuffer(),
+				indices: gl.createBuffer(),
+				colors: gl.createBuffer(),
+				texture: gl.createBuffer(),
+				normals: gl.createBuffer(),
+			};
+
+			// Setup
+			this.initBuffers();
+
+		},
+
+		initBuffers: function() { },
+
+		draw: function() {
+			var textures = this.textures,
+				textureCount = textures.length,
+				i;
+
+			mvMatrix.push();
+
+			// Translate then rotate using objects matrices
+			mat4.multiply(mvMatrix.matrix, this.mxTranslation);
+			mat4.multiply(mvMatrix.matrix, this.mxRotation);
+			mat4.multiply(mvMatrix.matrix, this.mxScale);
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.vertices);
+			gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, this.buffers.vertices.itemSize, gl.FLOAT, false, 0, 0);
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.colors);
+			gl.vertexAttribPointer(shaderProgram.vertexColorAttribute, this.buffers.colors.itemSize, gl.FLOAT, false, 0, 0);
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.normals);
+			gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, this.buffers.normals.itemSize, gl.FLOAT, false, 0, 0);
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texture);
+			gl.vertexAttribPointer(shaderProgram.textureCoordAttribute, this.buffers.texture.itemSize, gl.FLOAT, false, 0, 0);
+
+			// Texture/color specific
+			if(this.buffers.texture && this.textures.length) {
+				gl.uniform1i(shaderProgram.useTexturesUniform, true);
+
+				// Bind our textures
+				if(this.textures[0]) {
+					gl.activeTexture(gl.TEXTURE0);
+					gl.bindTexture(gl.TEXTURE_2D, this.textures[0].texture);
+				}
+			}
+			else {
+				gl.uniform1i(shaderProgram.useTexturesUniform, false);
+			}
+			gl.uniform1i(shaderProgram.samplerUniform, 0);
+
+			// 3D Specific calls
+			if(this.buffers.indices) {
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.indices);
+				setMatrixUniforms();
+				gl.drawElements(this.drawType, this.buffers.indices.numItems, gl.UNSIGNED_SHORT, 0);
+			}
+
+			// 2D specific calls
+			else {
+				setMatrixUniforms();
+				gl.drawArrays(this.drawType, 0, this.buffers.vertices.numItems);
+			}
+
+			mvMatrix.pop();
+		},
+
+		rotate: function(radians, x,y,z) { mat4.rotate(this.mxRotation, radians, [x||0,y||0,z||0]); },
+		scale: function(x,y,z) { mat4.scale(this.mxScale, [x||0,y||0,z||0]); },
+		translate: function(x,y,z) { mat4.translate(this.mxTranslation, [x||0,-y||0,z||0]); },
+
+		clearRotation: function() { mat4.identity(this.mxRotation); },
+		clearScale: function() { mat4.identity(this.mxScale); },
+		clearTranslation: function() { mat4.identity(this.mxTranslation); },
+
+		addTexture: function(texture) {
+			this.textures.push(texture);
+		},
+
+		destroy: function() {}
+	});
+
+
+	var Mesh = Primitive.extend({
+		init: function(url, callback) {
+			this._super([1.0,1.0,1.0]);
+			this.url = url;
+
+			this.load(url, callback);
+		},
+
+		load: function(url, callback) {
+			var _this = this,
+				xhr = new XMLHttpRequest();
+
+			xhr.open("GET", url, true);
+			xhr.onreadystatechange = function() {
+				if(xhr.readyState === 4) {
+					_this.parse( xhr.responseText );
+
+					callback.call(game);
+				}
+			}
+			xhr.send(null);
+		},
+
+		parse: function(data) {
+			// Eval it
+			if(this.url.substr(-4) === 'json') {
+				var obj = JSON.parse(data);
+				
+				this.buffers.normals = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.normals);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(obj.vertexNormals), gl.STATIC_DRAW);
+				this.buffers.normals.itemSize = 3;
+				this.buffers.normals.numItems = obj.vertexNormals.length / 3;
+
+				this.buffers.texture = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texture);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(obj.vertexTextureCoords), gl.STATIC_DRAW);
+				this.buffers.texture.itemSize = 2;
+				this.buffers.texture.numItems = obj.vertexTextureCoords.length / 2;
+
+				this.buffers.vertices = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.vertices);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(obj.vertexPositions), gl.STATIC_DRAW);
+				this.buffers.vertices.itemSize = 3;
+				this.buffers.vertices.numItems = obj.vertexPositions.length / 3;
+
+				this.buffers.indices = gl.createBuffer();
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.indices);
+				gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(obj.indices), gl.STATIC_DRAW);
+				this.buffers.indices.itemSize = 1;
+				this.buffers.indices.numItems = obj.indices.length;
+			}
+			else {
+				// Convert data into webGL buffer arrays
+				var obj = {}; doLoadObj(gl, obj, data, this.color);
+
+				// Set buffers
+				this.buffers = obj;
+			}
+		}
+	});
+
+	/*
+	 * Simple rectangle class
+	 */
+	var Rectangle = Primitive.extend({
+		name: 'Rectangle',
+
+		init: function(width, height, color) {
+			this._super(color);
+
+			this.width = width || 1;
+			this.height = height || 1;
+
+			// Set draw type and remove unneeded indices buffer
+			this.drawType = gl.TRIANGLE_STRIP;
+			this.buffers.indices = null;
+
+			mat4.scale(this.mxScale, [ this.width, this.height, 0 ]);
+		},
+
+		initBuffers: function() {
+			// vertices array
+			var vertices = new Float32Array([
+				1.0, 1.0, 0.0,
+				-1.0, 1.0, 0.0,
+				1.0, -1.0, 0.0,
+				-1.0, -1.0, 0.0
+			]),
+
+			// normal array
+			normals = new Float32Array([ 0, 0, 1,   0, 0, 1,   0, 0, 1,   0, 0, 1 ]),
+
+			// texture coordinate array
+			texture = new Float32Array([ 1, 1,   0, 1,   0, 0,   1, 0 ]),
+
+			// colors array
+			colors = [];
+			for(var i = 0; i < 4; i++) {
+				colors = colors.concat(this.color);
+			};
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.vertices);
+			gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+			this.buffers.vertices.itemSize = 3;
+			this.buffers.vertices.numItems = vertices.length / 3;
+
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.normals);
+			gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+			this.buffers.normals.itemSize = 3;
+			this.buffers.normals.numItems = normals.length / 3;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.colors);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+			this.buffers.colors.itemSize = 3;
+			this.buffers.colors.numItems = colors.length / 3;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texture);
+			gl.bufferData(gl.ARRAY_BUFFER, texture, gl.STATIC_DRAW);
+			this.buffers.texture.itemSize = 2;
+			this.buffers.texture.numItems = texture.length / 2;
+		}
+	});
+
+	/*
+	 * Rectangle encapsulation
+	 */
+	var Square = Rectangle.extend({
+		name: 'Square',
+
+		init: function(size, color) {
+			this.width = size || 1;
+			this.height = size || 1;
+
+			this._super(size, size, color);
+		}
+	})
+
+	/*
+	 * Basic sphere
+	 */
+	var Sphere = Primitive.extend({
+		name: 'Sphere',
+
+		init: function(radius, latBands, longBands, color) {
+			this.radius = radius = radius || 2;
+			this.latBands = latBands || 20;
+			this.longBands = longBands || 20;
+			this._super(color);
+		},
+
+		initBuffers: function() {
+			var vertices = [], colors = [], indices = [], normals = [], texture = [],
+				theta, phi, sinTheta, sinPhi, cosTheta, cosPhi,
+				lat, long, x, y, z, u, v, first, second;
+
+			for(lat = 0; lat <= this.latBands; ++lat) {
+				for(long = 0; long <= this.longBands; ++long) {
+					theta = lat * Math.PI / this.latBands;
+					phi = long * 2 * Math.PI / this.longBands;
+					sinTheta = Math.sin(theta);
+					sinPhi = Math.sin(phi);
+					cosTheta = Math.cos(theta);
+					cosPhi = Math.cos(phi);
+
+					x = cosPhi * sinTheta;
+					y = cosTheta;
+					z = sinPhi * sinTheta;
+					u = 1 - (long / this.longBands);
+					v = lat / this.latBands;
+
+					colors = colors.concat(this.color);
+					texture.push(u);
+					texture.push(v);
+
+					normals.push(x);
+					normals.push(y);
+					normals.push(z);
+					vertices.push(this.radius * x);
+					vertices.push(this.radius * y);
+					vertices.push(this.radius * z);
+
+					if(lat < this.latBands && long < this.longBands) {
+						first = (lat * (this.longBands+1)) + long;
+						second = first + this.longBands + 1;
+						indices.push(first);
+						indices.push(second);
+						indices.push(first+1);
+
+						indices.push(second);
+						indices.push(second+1);
+						indices.push(first+1);
+					}
+				}
+			}
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.vertices);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+			this.buffers.vertices.itemSize = 3;
+			this.buffers.vertices.numItems = vertices.length / 3;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.normals);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+			this.buffers.normals.itemSize = 3;
+			this.buffers.normals.numItems = normals.length / 3;
+
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.indices);
+			gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STREAM_DRAW);
+			this.buffers.indices.itemSize = 3;
+			this.buffers.indices.numItems = indices.length;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.colors);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+			this.buffers.colors.itemSize = 3;
+			this.buffers.colors.numItems = colors.length / 3;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texture);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texture), gl.STATIC_DRAW);
+			this.buffers.texture.itemSize = 2;
+			this.buffers.texture.numItems = texture.length / 2;
+		}
+	});
+
+	/*
+	 * Cuboid class
+	 */
+	var Cuboid = Primitive.extend({
+		name: 'Cuboid',
+
+		init: function(width, height, depth, color) {
+			this.width = width || 1;
+			this.height = height || 1;
+			this.depth = depth || 1;
+
+			this._super(color);
+
+			// Scale the object using provided dimensions
+			mat4.scale(this.mxScale, [ this.width, this.height, this.depth ]);
+		},
+
+		initBuffers: function() {
+			var vertices, texture, colors, indices, normals;
+
+			// box
+			//    v6----- v5
+			//   /|      /|
+			//  v1------v0|
+			//  | |     | |
+			//  | |v7---|-|v4
+			//  |/      |/
+			//  v2------v3
+			//
+			// vertex coords array
+			vertices = new Float32Array([
+				 1, 1, 1,  -1, 1, 1,  -1,-1, 1,   1,-1, 1,    // v0-v1-v2-v3 front
+				 1, 1, 1,   1,-1, 1,   1,-1,-1,   1, 1,-1,    // v0-v3-v4-v5 right
+				 1, 1, 1,   1, 1,-1,  -1, 1,-1,  -1, 1, 1,    // v0-v5-v6-v1 top
+				-1, 1, 1,  -1, 1,-1,  -1,-1,-1,  -1,-1, 1,    // v1-v6-v7-v2 left
+				-1,-1,-1,   1,-1,-1,   1,-1, 1,  -1,-1, 1,    // v7-v4-v3-v2 bottom
+				 1,-1,-1,  -1,-1,-1,  -1, 1,-1,   1, 1,-1     // v4-v7-v6-v5 back
+			]);
+
+			// normal array
+			normals = new Float32Array([
+				0, 0, 1,   0, 0, 1,   0, 0, 1,   0, 0, 1,     // v0-v1-v2-v3 front
+				1, 0, 0,   1, 0, 0,   1, 0, 0,   1, 0, 0,     // v0-v3-v4-v5 right
+				0, 1, 0,   0, 1, 0,   0, 1, 0,   0, 1, 0,     // v0-v5-v6-v1 top
+				-1, 0, 0,  -1, 0, 0,  -1, 0, 0,  -1, 0, 0,    // v1-v6-v7-v2 left
+				0,-1, 0,   0,-1, 0,   0,-1, 0,   0,-1, 0,     // v7-v4-v3-v2 bottom
+				0, 0,-1,   0, 0,-1,   0, 0,-1,   0, 0,-1      // v4-v7-v6-v5 back
+			]);
+
+			// texture coordinate array
+			texture = new Float32Array([
+				1, 1,   0, 1,   0, 0,   1, 0,    // v0-v1-v2-v3 front
+				0, 1,   0, 0,   1, 0,   1, 1,    // v0-v3-v4-v5 right
+				1, 0,   1, 1,   0, 1,   0, 0,    // v0-v5-v6-v1 top
+				1, 1,   0, 1,   0, 0,   1, 0,    // v1-v6-v7-v2 left
+				0, 0,   1, 0,   1, 1,   0, 1,    // v7-v4-v3-v2 bottom
+				0, 0,   1, 0,   1, 1,   0, 1     // v4-v7-v6-v5 back
+			]);
+
+			// colors array
+			var colors = [];
+			for(var i = 0; i < 24; i++) {
+				colors = colors.concat(this.color);
+			}
+
+			// index array
+			indices = new Uint16Array([
+				0, 1, 2,   0, 2, 3,    // front
+				4, 5, 6,   4, 6, 7,    // right
+				8, 9,10,   8,10,11,    // top
+				12,13,14,  12,14,15,    // left
+				16,17,18,  16,18,19,    // bottom
+				20,21,22,  20,22,23  // back
+			]);
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.vertices);
+			gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+			this.buffers.vertices.itemSize = 3;
+			this.buffers.vertices.numItems = vertices.length / 3;
+
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.normals);
+			gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+			this.buffers.normals.itemSize = 3;
+			this.buffers.normals.numItems = normals.length / 3;
+
+			gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.indices);
+			gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+			this.buffers.indices.itemSize = 1;
+			this.buffers.indices.numItems = indices.length;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.colors);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+			this.buffers.colors.itemSize = 3;
+			this.buffers.colors.numItems = colors.length / 3;
+
+			gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texture);
+			gl.bufferData(gl.ARRAY_BUFFER, texture, gl.STATIC_DRAW);
+			this.buffers.texture.itemSize = 2;
+			this.buffers.texture.numItems = texture.length / 2;
+		}
+	});
+
+	/*
+	 * Cuboid encapsulation
+	 */
+	var Cube = Cuboid.extend({
+		name: 'Cube',
+
+		init: function(size, color) {
+			this._super(size, size, size, color);
+		}
+	});
+
+
+	/*
+	 * Maze class
+	 *
+	 * Represents the games maze and associated wall and
+	 * power up objects, as well as basic collision detection.
+	 */
+	var Maze = Class.extend({
+		objects: [],
+		map: {},
+		freeSpace: [],
+
+		apples: [],
+		shrinks: [],
+
+		wallColor: [ 0.8, 0.8, 0.8 ],
+		floorColor: [ 1.0, 1.0, 1.0 ],
+
+		init: function(url, callback) {
+			this.url = url;
+			this.load(url, callback);
+		},
+
+		load: function(url, callback) {
+			var _this = this,
+				xhr = new XMLHttpRequest();
+
+			xhr.open("GET", url, true);
+			xhr.onreadystatechange = function() {
+				if(xhr.readyState === 4) {
+					_this.parse( xhr.responseText );
+
+					callback.call(game);
+				}
+			}
+			xhr.send(null);
+		},
+
+		parse: function(data) {
+			var rows = data.split('\n'),
+				width = 0,
+				height = rows.length,
+				freeMatch = (new Array(options.initialLength + 1)).join(' '),
+				chars, char, j, i, cube;
+
+			// Find maze width (use average block width)
+			rows.forEach(function(row, i) { width = Math.max(width, row.length); });
+
+			// Parse the maze
+			for(i = 0; i < height; i++) {
+				chars = rows[i].split('');
+
+				for(j = 0; j < width; j++) {
+					char = chars[j], end = !chars[j+1]
+
+					if((j < width && char === '#') || (j === width - 1)) {
+						cube = new Cube(1, this.wallColor);
+
+						cube.translate(j * options.blockSize, i * options.blockSize, 0)
+						this.objects.push(cube);
+
+						cube.addTexture( textures.crate );
+
+						// Track walls within map
+						game.maze.map[ j + '-' + i ] = [ game.TYPE_GRID ];
+					}
+
+					else if( rows[i].substr(j, options.initialLength) === freeMatch) {
+						this.freeSpace.push([j + options.initialLength - 1, i]);
+					}
+				}
+			}
+
+			// Create floor rectangle of same size
+			this.floor = new Rectangle(width, height, this.floorColor);
+			//this.floor.addTexture( new Texture('textures/snake.gif') );
+			this.floor.translate(width - (options.blockSize / 2), height - (options.blockSize / 2), -options.blockSize / 2);
+			this.objects.push(this.floor);
+
+			// Store width/height
+			this.width = width;
+			this.height = height;
+		},
+
+		draw: function() {
+			var count = this.objects.length;
+
+			for(var i = 0; i < count; i++) {
+				this.objects[i].draw();
+			}
+		},
+
+		addApple: function() {
+			var index, strIndex;
+
+			// Find a suitable placement on the grid (inside and not in the snake!)
+			do{
+				index = [ random(1, this.width - 2),  random(1, this.height - 2) ];
+				strIndex = index.join('-');
+			}
+			while(game.snake.segmentPos[ strIndex ] || this.map[ strIndex ]);
+
+			// Create our apple
+			apple = new Apple(game.maze, index);
+			game.objects.push(apple);
+
+			// Add apple to grid map
+			this.map[ strIndex ] = [ game.TYPE_APPLE, apple ];
+		},
+
+		addBlackApple: function() {
+			var index, strIndex;
+
+			// Find a suitable placement on the grid (inside and not in the snake!)
+			do{
+				index = [ random(1, this.width - 2),  random(1, this.height - 2) ];
+				strIndex = index.join('-');
+			}
+			while(game.snake.segmentPos[ strIndex ] || this.map[ strIndex ]);
+
+			// Create our apple
+			apple = new BlackApple(game.maze, index);
+			game.objects.push(apple);
+
+			// Add apple to grid map
+			this.map[ strIndex ] = [ game.TYPE_APPLE, apple ];
+		}
+	});
+
+	var Apple = Sphere.extend({
+		name: 'Apple',
+
+		init: function(maze, position, color) {
+			this.position = position;
+			this.maze = maze;
+			this.eaten = false;
+			this.color = color || [ 1.0, 0.2, 0.2 ];
+
+			this._super(0.8, 20, 20, this.color);
+
+			this.translate(position[0] * options.blockSize, position[1] * options.blockSize, .2);
+		},
+
+		animate: function(delta) {
+			if(this.eaten) {
+				var scaleBy = 0.92;
+				this.scale(scaleBy, scaleBy, scaleBy);
+				this.translate(0,0,10 * delta);
+			}
+		},
+
+		eat: function() {
+			var _this = this;
+
+			// Set as eaten
+			this.eaten = true;
+
+			// Gorw the snake
+			game.snake.grow();
+
+			// After animation is done, remove object
+			setTimeout(function() { _this.destroy(); }, 2000);
+
+			// After a random period, add another apple
+			setTimeout(function() { game.maze.addApple(); }, random(0, 16000));
+
+			// Increment score
+			game.hud.addScore(150);
+		},
+
+		destroy: function() {
+			// Remove from object array
+			for(i = 0; i < game.objects.length; i++) {
+				if(game.objects[i] === this) {
+					game.objects[i] = null;
+				}
+			}
+		}
+	});
+
+	var BlackApple = Apple.extend({
+		init: function(maze, position) {
+			this._super(maze, position, [ 0.1, 0.1, 0.1 ]);
+		},
+
+		eat: function() {
+			var _this = this, oldLighting = lighting.slice();
+
+			// Set as eaten
+			this.eaten = true;
+
+			// Lose a life
+			game.hud.removeLife();
+
+			// After animation is done, remove object and reset lighting
+			this.draw = null;
+			setTimeout(function() { _this.destroy(); lighting = oldLighting; }, 3000);
+
+			// Add another after a long interval
+			setTimeout(function() {
+				game.maze.addBlackApple();
+			},
+			random(20000, 40000));
+
+		},
+
+		animate: function(delta) {
+			if(this.eaten) {
+				lighting[0] -= 1.0 * delta;
+				lighting[2] -= 1.0 * delta;
+			}
+		},
+	})
+
+	var HUD = Class.extend({
+		name: 'Heads up display',
+		
+		init: function(score, lives) {
+			this.score = score;
+			this.lives = lives;
+			this.element = document.getElementById('hud');
+
+			// Update the score
+			this.update(score);
+		},
+
+		update: function(score) {
+			hud.innerHTML = '<b>' + this.score + '</b>' +
+				'<i>' + this.lives + ' li' + (this.lives === 1 ? 'fe' : 'ves') + '</i>'
+
+			document.title = 'WebGL Snake - Score: ' + this.score;
+		},
+
+		addScore: function(amount) {
+			this.score += parseInt(amount, 10) || 0;
+
+			this.update();
+		},
+
+		removeLife: function() {
+			// Reduce lives
+			this.lives -=1;
+
+			// If we have no more lives... game over!
+			if(this.lives < 1) {
+				elements.gameover.style.display = 'block';
+				game.pause();
+
+				return false;
+			}
+
+			// Update
+			this.update();
+			return true;
+		}
+	});
+
+	var Snake = Class.extend({
+		segments: [],
+		segmentPos: [],
+		newSegments: [],
+
+		color: [ 0.6, 1.0, 0.3 ],
+		headColor: [ 0.3, 1.0, 0.1 ],
+		length: options.initialLength,
+
+		initialPosition: [ 0, 0 ],
+		position: [ 0, 0 ],
+
+		initialVelocity: [ 1, 0 ],
+		velocity: [ 1, 0 ],
+
+		turns: {},
+
+		tick: 0,
+
+		init: function(x, y) {
+			var i, segment;
+
+			// Place at a random point in the maze freeSpace
+			this.initialPosition = game.maze.freeSpace[ Math.floor(Math.random() * game.maze.freeSpace.length) ];
+			this.position = this.initialPosition.slice();
+
+			// Create initial snake using length
+			for(i = 0; i < this.length; i++) {
+				segment = new SnakeSegment(
+					[ this.position[0] - i, this.position[1] ],
+					this.velocity,
+					!i ? this.headColor : this.color
+				);
+
+				segment.addTexture( textures[i % 2 ? 'snake' : 'snake2'] );
+				this.segments.push(segment);
+			}
+		},
+
+		reset: function() {
+			var i, segment;
+
+			// Pause game momentarily
+			game.pause();
+
+			// Reset to initial position and velocity
+			this.position = this.initialPosition;
+			this.velocity = this.initialVelocity;
+
+			// Reset turns and length
+			this.turns = {};
+			this.length = options.initialLength;
+
+			this.segments = [];
+			for(i = 0; i < this.length; i++) {
+				segment = new SnakeSegment(
+					[ this.position[0] - i, this.position[1] ],
+					this.velocity,
+					!i ? this.headColor : this.color
+				);
+
+				segment.addTexture( textures[i % 2 ? 'snake' : 'snake2'] );
+				this.segments.push(segment);
+			}
+
+			// Resume game
+			game.resume();
+		},
+
+		grow: function(by) {
+			var last = this.segments[ this.segments.length - 1 ], segment;
+
+			this.newSegments.push(
+				segment = new SnakeSegment(
+					last.position.slice(),
+					last.velocity.slice(),
+					this.color
+				)
+			);
+			segment.addTexture( textures[this.length % 2 ? 'snake' : 'snake2'] );
+
+			// Increase overall snake length
+			this.length++;
+		},
+
+		turn: function(dir) {
+			var index = this.position[0] + '-' + this.position[1];
+
+			// Don't allow multiple turnings on the same spot
+			if(this.turns[index]) { return; }
+
+			switch(dir) {
+				case 'up':
+				case 'down':
+					if(this.velocity[1] === 0) {
+						this.turns[index] = [ 0, dir === 'up' ? -1 : 1, 0 ];
+					}
+				break;
+
+				case 'left':
+				case 'right':
+					if(this.velocity[0] === 0) {
+						this.turns[index] = [ dir === 'left' ? -1 : 1, 0, 0 ];
+					}
+
+				break;
+			}
+		},
+
+		checkCollision: function(x, y) {
+			var index = x + '-' + y,
+				collision = this.segmentPos[ index ] || game.maze.map[ index ] || [],
+				segment, apple;
+
+			switch(collision[0]) {
+				case game.TYPE_GRID:
+					this.die();
+					return true;
+				break;
+
+				case game.TYPE_SNAKE:
+					segment = collision[1];
+					if(segment !== this.segments[ this.segments.length - 1 ]) {
+						this.die();
+						return true;
+					}
+				break;
+
+				case game.TYPE_APPLE:
+				case game.TYPE_APPLE:
+					apple = collision[1];
+					apple.eat();
+				break;
+			}
+		},
+
+		draw: function() {
+			var count = this.segments.length;
+
+			for(var i = 0; i < count; i++) {
+				this.segments[i].draw();
+			}
+		},
+
+		animate: function(delta, force) {
+			var count = this.segments.length,
+				i, segment, segmentPos = {};
+
+			if(this.velocity === 0) { return; }
+
+			this.tick = this.tick + 1 * delta * options.speed;
+			if(this.tick > 1) { this.tick = 0; }
+
+			if(this.tick === 0 || force) {
+				// Move the head initially
+				segment = this.segments[0];
+				segment.move();
+
+				// Detect if any collision occurred
+				collision = this.checkCollision(segment.position[0], segment.position[1]);
+
+				// If no collision occurred..
+				if(!collision) {
+					// Add new segments
+					this.segments = this.segments.concat(this.newSegments);
+					this.newSegments = [];
+
+					// Set your new position and velocity
+					this.position = segment.position;
+					this.velocity = segment.velocity;
+
+					// Set camera position
+					cameras.first.x = segment.position[0] * options.blockSize;
+					cameras.first.y = -segment.position[1] * options.blockSize;
+
+					// Move the rest of our body
+					for(i = count - 1; i > 0; i--) {
+						var segment = this.segments[i];
+
+						// Move the segment
+						segment.move();
+
+						// Track segment position
+						segmentPos[ segment.gridIndex() ] = [ game.TYPE_SNAKE, segment ];
+					}
+
+				}
+
+				// A collision occurred, revert head to previous position
+				else{ segment.revert(); }
+
+
+
+				// Set new segment positions
+				this.segmentPos = segmentPos;
+			}
+		},
+
+		die: function() {
+			var oldlighting = lighting;
+
+			// Stop moving
+			this.velocity = 0;
+
+			// Set lighting as more red
+			lighting = [ 1.0, 0.3, 0.3 ];
+
+			// Reduce life count
+			if(game.hud.removeLife()) {
+				// Wait 2 seconds and reset
+				setTimeout(function() {
+					// Reset lighting
+					lighting = oldlighting;
+
+					// Reset snake
+					game.snake.reset();
+				},
+				2000)
+			}
+		},
+
+		destroy: function() {
+
+		}
+	});
+
+	var SnakeSegment = Cube.extend({
+		name: 'Snake segment',
+
+		init: function(position, velocity, color) {
+			this.position = position;
+			this.velocity = velocity;
+
+			this._super(1, color);
+
+			this.translate(
+				this.position[0] * options.blockSize,
+				this.position[1] * options.blockSize,
+				0
+			);
+
+			this.scale(1, 1, 1);
+		},
+
+		move: function(test) {
+			var turn = game.snake.turns[ this.gridIndex() ];
+
+			// If a turn was done on current positions grid index...
+			if(turn) {
+				// Set our new velocity based on the grids turn
+				this.velocity = [ turn[0], turn[1] ];
+				this.rotate( degToRad(90), 0, 0, 1 )
+
+				// Increment turn counter and if all segments have passed through, remove it
+				if(++turn[2] === game.snake.length) {
+					game.snake.turns[ this.gridIndex() ] = undefined;
+				}
+			}
+
+			this.translate(
+				this.velocity[0] * options.blockSize,
+				this.velocity[1] * options.blockSize,
+				0
+			);
+
+			// Track position on grid
+			this.position[0] += this.velocity[0];
+			this.position[1] += this.velocity[1];
+		},
+
+		revert: function() {
+			this.translate(
+				-this.velocity[0] * options.blockSize,
+				-this.velocity[1] * options.blockSize,
+				0
+			);
+
+			this.position[0] -= this.velocity[0];
+			this.position[1] -= this.velocity[1];
+		},
+
+		gridIndex: function() {
+			return this.position[0] + '-' + this.position[1];
+		}
+	})
+
+
+	/*
+	 * setMatrixUniforms
+	 *
+	 * Pushes model-view, perspective and normal matrices out to WebGL
+	 *
+	 * @returns NULL
+	 */
+	function setMatrixUniforms() {
+		gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix.matrix);
+		gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix.matrix);
+
+		var normalMatrix = mat3.create();
+		mat4.toInverseMat3(mvMatrix, normalMatrix);
+		mat3.transpose(normalMatrix);
+		gl.uniformMatrix3fv(shaderProgram.nMatrixUniform, false, normalMatrix);
+	}
+
+	function initShaders() {
+		var fragmentShader = loadShader(gl, "shader-fs"),
+			vertexShader = loadShader(gl, "shader-vs");
+
+		shaderProgram = gl.createProgram();
+		gl.attachShader(shaderProgram, vertexShader);
+		gl.attachShader(shaderProgram, fragmentShader);
+		gl.linkProgram(shaderProgram);
+
+		if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+			alert("Could not initialise shaders");
+		}
+
+		gl.useProgram(shaderProgram);
+
+		shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+		gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+
+		shaderProgram.vertexNormalAttribute = gl.getAttribLocation(shaderProgram, "aVertexNormal");
+		gl.enableVertexAttribArray(shaderProgram.vertexNormalAttribute);
+		
+		shaderProgram.vertexColorAttribute = gl.getAttribLocation(shaderProgram, "aVertexColor");
+		gl.enableVertexAttribArray(shaderProgram.vertexColorAttribute);
+
+		shaderProgram.textureCoordAttribute = gl.getAttribLocation(shaderProgram, "aTextureCoord");
+		gl.enableVertexAttribArray(shaderProgram.textureCoordAttribute);
+
+		shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+		shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+		shaderProgram.nMatrixUniform = gl.getUniformLocation(shaderProgram, "uNMatrix");
+		shaderProgram.samplerUniform = gl.getUniformLocation(shaderProgram, "uSampler");
+		shaderProgram.useTexturesUniform = gl.getUniformLocation(shaderProgram, "uUseTextures");
+		shaderProgram.useLightingUniform = gl.getUniformLocation(shaderProgram, "uUseLighting");
+		shaderProgram.ambientColorUniform = gl.getUniformLocation(shaderProgram, "uAmbientColor");
+		shaderProgram.pointLightingLocationUniform = gl.getUniformLocation(shaderProgram, "uPointLightingLocation");
+		shaderProgram.pointLightingColorUniform = gl.getUniformLocation(shaderProgram, "uPointLightingColor");
+	}
+
+	function initKeyboard() {
+		// Escape - set exit flag that stops animation loop
+		keyboard.bind(keyboard.ESCAPE, function() { game.exit(); })
+
+		// P - Pause game
+		.bind(keyboard.P, function() { game.pause(!cache.pause); })
+
+		// Space - add length
+		//.bind(keyboard.SPACE, function() { game.snake.grow(); })
+
+		// A - Add apple
+		//.bind(keyboard.A, function() { game.maze.addApple(); })
+
+		// V - Change view
+		.bind(keyboard.V, function() { cameras.current = cameras.current === 'first' ? 'third' : 'first'; })
+
+		// Snake velocity
+		.bind(keyboard.ARROW_UP, function() { game.snake.turn('up') })
+		.bind(keyboard.ARROW_DOWN, function() { game.snake.turn('down') })
+		.bind(keyboard.ARROW_LEFT, function() { game.snake.turn('left') })
+		.bind(keyboard.ARROW_RIGHT, function() { game.snake.turn('right') });
+	}
+
+
+
+	function initMouse() {
+		// Rotate scene on drag-click
+		mouse.bind(function(coords, diff) {
+
+			var newRotationMatrix = mat4.create();
+			mat4.identity(newRotationMatrix);
+
+			mat4.rotate(newRotationMatrix, degToRad(-diff.x / 5), [0, 1, 0]);
+			mat4.rotate(newRotationMatrix, degToRad(-diff.y / 5), [1, 0, 0]);
+
+			mat4.multiply(newRotationMatrix, transform, transform);
+
+		}, true)
+
+		// Zoom on scroll
+		.scroll(function(prop) { zoom += prop.dir * 3; });
+	}
+
+	/*
+	 * Main animation loop
+	 */
+	function mainLoop() {
+		// Draw the scene
+		game.drawScene();
+
+		// Animate
+		game.animateScene();
+
+		// Continue on with animation if we haven't exited
+		if(!cache.pause) { requestAnimFrame(mainLoop); }
+	}
+
+	/*
+	 * Texture initialization
+	 */
+	function initTextures() {
+		textures.crate = new Texture('textures/crate.gif');
+		textures.snake = new Texture('textures/snake.gif');
+		textures.snake2 = new Texture('textures/snake2.gif');
+	}
+
+	/*
+	 * World initialization
+	 */
+	function initWorld() {
+		// Create maze initially and when parsed...
+		game.maze = new Maze('mazes/simple.txt', function() {
+			// Create scoreboard
+			game.hud = new HUD(0, options.initialLives);
+
+			// Create snake
+			game.snake = new Snake();
+
+			// Setup random apples
+			for(i = 0; i < random(2, 5); i++) {
+				game.maze.addApple();
+			}
+
+			// Add bad apple
+			game.maze.addBlackApple();
+
+			// Ready, go
+			readyGo();
+		});
+	}
+
+	/*
+	 * Start countdown
+	 */
+	function readyGo() {
+		var count = 4;
+		(function timer() {
+			// Set count
+			elements.loading.firstElementChild.innerHTML = --count;
+
+			if(count < 1) { go(); }
+			else { setTimeout(timer, 1000); }
+		}())
+
+		function go() {
+			// Start the game
+			game.resume();
+
+			// Remove loading screen
+			elements.loading.style.display = 'none';
+		}
+	}
+
+	this.init = function() {
+		// Setup canvas context
+		try {
+			gl = canvas.getContext("experimental-webgl")
+			gl.viewportWidth = canvas.width;
+			gl.viewportHeight = canvas.height;
+		}
+		catch (e) { }
+
+		// Display error if we couldn't initialise the canvas and return
+		if(!gl) { return alert("Could not initialise WebGL, sorry :-("); }
+
+		// Initialise shaders and textures
+		initShaders();
+		initTextures();
+
+		// Init world
+		initWorld();
+
+		// Initialise input handlers
+		initKeyboard();
+		initMouse();
+
+		// Clear canvas and enable depth testing
+		gl.clearColor(0.0, 0.0, 0.0, 1.0);
+		gl.enable(gl.DEPTH_TEST);
+		gl.enable(gl.CULL_FACE);
+		gl.enable(gl.BLEND);
+
+		// Tick timer initially
+		timer.tick();
+
+		// Keep track of FPS
+		cache.fps = new Framerate('fps');
+	};
+
+	this.drawScene = function() {
+		gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+		gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+		// Setup orthographic perspctive
+		mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 200.0, pMatrix.matrix);
+
+		// Reset our model-view matrix and translate to zoom level
+		mat4.identity( mvMatrix.matrix );
+		mat4.multiply(mvMatrix.matrix, transform);
+
+		// Set camera
+		if(cameras.current === 'third') {
+			mat4.rotate(mvMatrix.matrix, degToRad(-20), [1, 0, 0]);
+			mat4.translate(mvMatrix.matrix, [-game.maze.width, game.maze.height + 20, zoom]);
+		}
+		else if(cameras.current === 'first') {
+        mat4.rotate(mvMatrix.matrix, degToRad(-cameras.first.pitch), [1, 0, 0]);
+        mat4.rotate(mvMatrix.matrix, degToRad(-cameras.first.yaw), [0, 1, 0]);
+        mat4.translate(mvMatrix.matrix, [-cameras.first.x, -cameras.first.y, -cameras.first.z]);
+		}
+
+		// Setup lighting
+		gl.uniform1i(shaderProgram.useLightingUniform, true);
+		gl.uniform3f(shaderProgram.ambientColorUniform, lighting[0], lighting[1], lighting[2]);
+		gl.uniform3f(shaderProgram.pointLightingLocationUniform, parseFloat(-game.maze.width), parseFloat(game.maze.height), -5);
+		gl.uniform3f(shaderProgram.pointLightingColorUniform, 0.8, 0, 0);
+
+		// Draw the maze and snake
+		game.maze.draw();
+		game.snake.draw();
+
+		// Draw our objects
+		for(i in this.objects) {
+			if(this.objects[i] && this.objects[i].draw) {
+				this.objects[i].draw();
+			}
+		}
+
+		cache.fps.snapshot();
+	};
+
+	this.animateScene = function() {
+		// Calculcate delta time
+		var delta = timer.getDelta();
+
+		// Animate player
+		game.snake.animate(delta);
+
+		// Animate objects
+		for(i in this.objects) {
+			if(this.objects[i] && this.objects[i].animate) {
+				this.objects[i].animate(delta);
+			}
+		}
+
+		// Tick the frame timer
+		timer.tick();
+	};
+
+	this.pause = function(state) {
+		cache.pause = 'undefined' !== typeof state ? !!state : true;
+		if(!cache.pause) { mainLoop(); }
+	};
+	this.resume = function() { game.pause(false); }
+
+	this.exit = function() {
+		// Stop animation
+		cache.pause = 1;
+
+		// Remove canvas
+		canvas.parentNode.removeChild(canvas);
+	}
+
+	this.init();
+}
+
+new Game( document.getElementById('game') );
+</script>
+
+</body>
+</html>
